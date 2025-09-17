@@ -312,3 +312,111 @@
     )
   )
 )
+
+(define-constant ERR-INSURANCE-CLAIM-REJECTED (err u1013))
+(define-constant ERR-REFERRAL-NOT-FOUND (err u1014))
+(define-constant ERR-TRADING-PAIR-NOT-FOUND (err u1015))
+(define-constant ERR-FLASH-LOAN-FAILED (err u1016))
+(define-constant ERR-VAULT-LOCKED (err u1017))
+(define-constant ERR-INSUFFICIENT-BALANCE (err u1018))
+(define-constant ERR-SWAP-SLIPPAGE-EXCEEDED (err u1019))
+(define-constant ERR-LIMIT-ORDER-INVALID (err u1020))
+(define-constant ERR-NFT-COLLATERAL-INVALID (err u1021))
+(define-constant ERR-YIELD-FARM-NOT-FOUND (err u1022))
+
+;; Insurance fund to cover bad debt from liquidations
+(define-data-var insurance-fund-balance uint u0)
+(define-data-var insurance-premium-rate uint u2) ;; 0.2% premium
+(define-data-var insurance-coverage-ratio uint u80) ;; 80% coverage
+
+(define-map insurance-claims 
+  { claim-id: uint }
+  {
+    claimant: principal,
+    asset-id: uint,
+    amount: uint,
+    status: (string-ascii 10), ;; "pending", "approved", "rejected"
+    timestamp: uint
+  }
+)
+
+(define-data-var claim-counter uint u0)
+
+;; Contribute to insurance fund
+(define-public (contribute-to-insurance-fund (amount uint))
+  (begin
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    ;; In a real implementation, this would transfer STX from tx-sender to the contract
+    ;; For this example, we're just incrementing the fund balance
+    (var-set insurance-fund-balance (+ (var-get insurance-fund-balance) amount))
+    (ok (var-get insurance-fund-balance))
+  )
+)
+
+(define-public (file-insurance-claim (asset-id uint) (amount uint))
+  (begin
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (let ((claim-id (var-get claim-counter)))
+      (var-set claim-counter (+ claim-id u1))
+      (map-set insurance-claims 
+        { claim-id: claim-id }
+        {
+          claimant: tx-sender,
+          asset-id: asset-id,
+          amount: amount,
+          status: "pending",
+          timestamp: stacks-block-height
+        }
+      )
+      (ok claim-id)
+    )
+  )
+)
+
+;; Review an insurance claim - governance only
+(define-public (review-insurance-claim (claim-id uint) (approve bool))
+  (begin
+    (asserts! (is-eq tx-sender (var-get governance-address)) ERR-NOT-AUTHORIZED)
+    
+    (match (map-get? insurance-claims { claim-id: claim-id })
+      claim-data
+      (begin
+        (if approve
+          (begin
+            ;; Calculate payout amount based on coverage ratio
+            (let 
+              (
+                (payout-amount (/ (* (get amount claim-data) (var-get insurance-coverage-ratio)) u100))
+              )
+              ;; Check if insurance fund has enough balance
+              (asserts! (<= payout-amount (var-get insurance-fund-balance)) ERR-INSUFFICIENT-COLLATERAL)
+              
+              ;; Update insurance fund balance
+              (var-set insurance-fund-balance (- (var-get insurance-fund-balance) payout-amount))
+              
+              ;; In a real implementation, this would transfer the payout to the claimant
+              ;; For this example, we're just updating the claim status
+              
+              ;; Update claim status
+              (map-set insurance-claims
+                { claim-id: claim-id }
+                (merge claim-data { status: "approved" })
+              )
+              
+              (ok payout-amount)
+            )
+          )
+          (begin
+            ;; Reject the claim
+            (map-set insurance-claims
+              { claim-id: claim-id }
+              (merge claim-data { status: "rejected" })
+            )
+            (ok u0)
+          )
+        )
+      )
+      ERR-INSURANCE-CLAIM-REJECTED
+    )
+  )
+)
